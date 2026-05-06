@@ -17,6 +17,12 @@ from ._core.runtime import (
     load_inference_runtime,
     predict_text,
 )
+from ._core.reversible import (
+    ReversibleVault,
+    TokenizedSpan,
+    apply_reversible_tokenization,
+    restore_text as restore_text_from_vault,
+)
 
 
 class _InheritType:
@@ -82,6 +88,85 @@ class RedactionResult:
             TypeError: If the payload cannot be serialized as JSON.
         """
         return json.dumps(self.to_dict(), indent=indent, ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class ReversibleRedactionResult:
+    """Structured result returned by the reversible tokenization API."""
+
+    schema_version: int
+    summary: dict[str, object]
+    text: str
+    detected_spans: tuple[DetectedSpan, ...]
+    tokenized_spans: tuple[TokenizedSpan, ...]
+    tokenized_text: str
+    vault: ReversibleVault
+    warning: str | None = None
+
+    def to_dict(
+        self,
+        *,
+        include_vault: bool = False,
+        include_vault_values: bool = False,
+    ) -> dict[str, object]:
+        """Convert the tokenization result into a JSON-serializable dictionary.
+
+        Raw vault values are excluded unless ``include_vault_values`` is
+        explicitly enabled.
+        """
+        payload: dict[str, object] = {
+            "schema_version": int(self.schema_version),
+            "summary": dict(self.summary),
+            "text": self.text,
+            "detected_spans": [
+                {
+                    "label": span.label,
+                    "start": span.start,
+                    "end": span.end,
+                    "text": span.text,
+                    "placeholder": span.placeholder,
+                }
+                for span in self.detected_spans
+            ],
+            "tokenized_spans": [
+                {
+                    "label": span.label,
+                    "start": span.start,
+                    "end": span.end,
+                    "text": span.text,
+                    "token": span.token,
+                    "token_start": span.token_start,
+                    "token_end": span.token_end,
+                }
+                for span in self.tokenized_spans
+            ],
+            "tokenized_text": self.tokenized_text,
+            "vault_id": self.vault.vault_id,
+        }
+        if self.warning is not None:
+            payload["warning"] = self.warning
+        if include_vault or include_vault_values:
+            payload["vault"] = self.vault.to_dict(
+                include_values=include_vault_values,
+            )
+        return payload
+
+    def to_json(
+        self,
+        *,
+        indent: int | None = 2,
+        include_vault: bool = False,
+        include_vault_values: bool = False,
+    ) -> str:
+        """Serialize the tokenization result as JSON."""
+        return json.dumps(
+            self.to_dict(
+                include_vault=include_vault,
+                include_vault_values=include_vault_values,
+            ),
+            indent=indent,
+            ensure_ascii=False,
+        )
 
 
 @dataclass(frozen=True)
@@ -270,6 +355,45 @@ class OPF:
             text=prediction.text,
             detected_spans=tuple(prediction.spans),
             redacted_text=redacted_text,
+            warning=_warning_for_prediction(prediction),
+        )
+
+    def tokenize(
+        self,
+        text: str,
+        *,
+        vault: ReversibleVault | None = None,
+        decode: DecodeOptions | None = None,
+    ) -> ReversibleRedactionResult:
+        """Run reversible tokenization on one input string.
+
+        The returned vault contains token-to-original mappings and must be
+        protected as sensitive data.
+        """
+        runtime, decoder = self.get_prediction_components(decode=decode)
+        prediction = predict_text(runtime, text, decoder=decoder)
+        tokenized_text, tokenized_spans, resolved_vault = (
+            apply_reversible_tokenization(
+                text=prediction.text,
+                spans=prediction.spans,
+                vault=vault,
+            )
+        )
+        summary = build_detection_summary(
+            output_mode=runtime.output_mode,
+            labels=[span.label for span in prediction.spans],
+            decoded_mismatch=prediction.decoded_mismatch,
+        )
+        summary["reversible"] = True
+        summary["vault_id"] = resolved_vault.vault_id
+        return ReversibleRedactionResult(
+            schema_version=SCHEMA_VERSION,
+            summary=summary,
+            text=prediction.text,
+            detected_spans=tuple(prediction.spans),
+            tokenized_spans=tuple(tokenized_spans),
+            tokenized_text=tokenized_text,
+            vault=resolved_vault,
             warning=_warning_for_prediction(prediction),
         )
 
@@ -486,3 +610,8 @@ def redact(text: str) -> str:
         RuntimeError: If the local checkpoint cannot be loaded.
     """
     return str(_default_redactor().redact(text))
+
+
+def restore(tokenized_text: str, vault: ReversibleVault) -> str:
+    """Restore text from a reversible vault."""
+    return restore_text_from_vault(tokenized_text=tokenized_text, vault=vault)

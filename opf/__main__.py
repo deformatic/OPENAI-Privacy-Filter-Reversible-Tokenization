@@ -65,6 +65,31 @@ def build_redaction_parser(*, prog: str | None = None) -> argparse.ArgumentParse
         default=None,
         help="Print redacted text or the structured JSON schema output.",
     )
+    output_group.add_argument(
+        "--recoverable",
+        action="store_true",
+        help=(
+            "Use reversible tokenization instead of ordinary placeholder "
+            "redaction."
+        ),
+    )
+    output_group.add_argument(
+        "--vault-in",
+        type=str,
+        default=None,
+        help="Load an existing reversible vault for stable cross-document tokens.",
+    )
+    output_group.add_argument(
+        "--vault-out",
+        type=str,
+        default=None,
+        help="Write the reversible vault after processing inputs.",
+    )
+    output_group.add_argument(
+        "--include-vault-values",
+        action="store_true",
+        help="Include raw vault values in JSON output. Dangerous; prefer --vault-out.",
+    )
     input_group.add_argument(
         "-f",
         "--text-file",
@@ -98,9 +123,14 @@ def _run_redaction_command(argv: Sequence[str], *, prog: str | None = None) -> N
     args = parse_args(argv, prog=prog)
     if args.json_indent < 0:
         raise ValueError("json_indent must be >= 0")
+    if not args.recoverable and (
+        args.vault_in or args.vault_out or args.include_vault_values
+    ):
+        raise ValueError("vault options require --recoverable")
 
-    from ._api import RedactionResult
+    from ._api import RedactionResult, ReversibleRedactionResult
     from ._common.terminal_colors import build_label_color_map
+    from ._core.reversible import ReversibleVault
     from ._cli.render import (
         build_redactor_from_args,
         build_session_runtime_view,
@@ -116,6 +146,7 @@ def _run_redaction_command(argv: Sequence[str], *, prog: str | None = None) -> N
         args,
         output_text_only=effective_format == "text",
     )
+    vault = ReversibleVault.load(args.vault_in) if args.vault_in else None
     runtime = None
     label_colors = None
     if effective_format == "json":
@@ -133,10 +164,45 @@ def _run_redaction_command(argv: Sequence[str], *, prog: str | None = None) -> N
             label_colors = build_label_color_map(legend_labels)
     for text in iter_inputs(args):
         infer_start = time.perf_counter()
-        result = redactor.redact(text)
+        if args.recoverable:
+            result = redactor.tokenize(text, vault=vault)
+            vault = result.vault
+        else:
+            result = redactor.redact(text)
         latency_ms = (time.perf_counter() - infer_start) * 1000.0
         if effective_format == "text":
-            print(str(result))
+            if isinstance(result, ReversibleRedactionResult):
+                print(result.tokenized_text)
+            else:
+                print(str(result))
+            continue
+        if isinstance(result, ReversibleRedactionResult):
+            print(
+                run_summary_line(
+                    summary=result.summary,
+                    latency_ms=latency_ms,
+                ),
+                file=sys.stderr,
+            )
+            print(
+                json.dumps(
+                    result.to_dict(
+                        include_vault=args.include_vault_values,
+                        include_vault_values=args.include_vault_values,
+                    ),
+                    indent=args.json_indent,
+                    ensure_ascii=False,
+                )
+            )
+            if args.print_color_coded_text and label_colors is not None:
+                color_coded_text = render_color_coded_text(
+                    text=result.text,
+                    spans=result.detected_spans,
+                    label_colors=label_colors,
+                )
+                print(render_color_legend(label_colors=label_colors))
+                print("color coded text:")
+                print(color_coded_text if color_coded_text else "(empty)")
             continue
         if not isinstance(result, RedactionResult):
             raise TypeError("json output requires a structured RedactionResult")
@@ -157,6 +223,10 @@ def _run_redaction_command(argv: Sequence[str], *, prog: str | None = None) -> N
             print(render_color_legend(label_colors=label_colors))
             print("color coded text:")
             print(color_coded_text if color_coded_text else "(empty)")
+    if args.recoverable and args.vault_out:
+        if vault is None:
+            vault = ReversibleVault()
+        vault.save(args.vault_out)
 
 
 def _run_eval_command(argv: Sequence[str]) -> None:

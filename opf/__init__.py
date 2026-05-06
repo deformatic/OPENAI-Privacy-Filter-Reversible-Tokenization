@@ -1,6 +1,15 @@
 """Public OPF package."""
 
-__all__ = ["DecodeOptions", "INHERIT", "OPF", "RedactionResult", "redact"]
+__all__ = [
+    "DecodeOptions",
+    "INHERIT",
+    "OPF",
+    "RedactionResult",
+    "ReversibleRedactionResult",
+    "ReversibleVault",
+    "redact",
+    "restore",
+]
 
 
 def redact(text: str) -> str:
@@ -39,4 +48,16 @@ def __getattr__(name: str):
         from ._api import RedactionResult
 
         return RedactionResult
+    if name == "ReversibleRedactionResult":
+        from ._api import ReversibleRedactionResult
+
+        return ReversibleRedactionResult
+    if name == "ReversibleVault":
+        from ._core.reversible import ReversibleVault
+
+        return ReversibleVault
+    if name == "restore":
+        from ._api import restore
+
+        return restore
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

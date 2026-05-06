@@ -60,6 +60,34 @@ The redaction can also be performed via pipes, to support complex one-liners:
 cat /path/to/file | grep -e 'some_pattern' | opf
 ```
 
+To produce reversible tokens instead of ordinary placeholders, use
+`--recoverable` and write the token vault to a protected file:
+
+```bash
+opf --device cpu \
+  --recoverable \
+  --vault-out vault.json \
+  --format json \
+  "Alice emailed Bob. Alice's phone is 555-1111."
+```
+
+The returned text contains stable per-value tokens such as
+`<PRIVATE_PERSON_1>`. The vault maps those tokens back to original values and
+must be protected like the source PII. Plaintext JSON vaults are intended only
+for local development.
+
+The same flow is available from Python:
+
+```python
+from opf import OPF, ReversibleVault, restore
+
+redactor = OPF(device="cpu")
+vault = ReversibleVault()
+result = redactor.tokenize("Alice emailed Bob.", vault=vault)
+
+assert restore(result.tokenized_text, vault) == "Alice emailed Bob."
+```
+
 If no input is provided, `opf` will start in interactive mode. In this mode, for each input example, the CLI prints structured JSON output, using ANSI color-coded previews if the terminal supports them. These options can be controlled by flags.
 
 Consult `opf redact --help` for more flags and information about the redaction mode.
